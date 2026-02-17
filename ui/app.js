@@ -64,6 +64,220 @@ function setJSON(id, value) {
   $(id).textContent = JSON.stringify(value, null, 2);
 }
 
+const BALANCE_AVAILABLE_KEYS = new Set([
+  "available",
+  "available_balance",
+  "available_usdc",
+  "usdc_available",
+  "free",
+  "free_balance",
+  "spendable",
+  "buying_power",
+  "buyingpower",
+]);
+
+const BALANCE_TOTAL_KEYS = new Set([
+  "balance",
+  "total",
+  "total_balance",
+  "total_usdc",
+  "usdc_balance",
+  "cash_balance",
+  "collateral",
+  "equity",
+]);
+
+function normalizeKey(value) {
+  return String(value || "").trim().toLowerCase().replaceAll("-", "_");
+}
+
+function toNumber(value) {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : null;
+  }
+  if (typeof value === "string") {
+    let text = value.trim().replaceAll(",", "");
+    if (text.startsWith("$")) {
+      text = text.slice(1);
+    }
+    if (!text) {
+      return null;
+    }
+    const parsed = Number(text);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function findFirstNumericByKeys(obj, keys) {
+  if (!obj || typeof obj !== "object") {
+    return null;
+  }
+
+  if (Array.isArray(obj)) {
+    for (const item of obj) {
+      const nested = findFirstNumericByKeys(item, keys);
+      if (nested !== null) {
+        return nested;
+      }
+    }
+    return null;
+  }
+
+  for (const [key, value] of Object.entries(obj)) {
+    if (keys.has(normalizeKey(key))) {
+      const n = toNumber(value);
+      if (n !== null) {
+        return n;
+      }
+    }
+  }
+
+  for (const value of Object.values(obj)) {
+    const nested = findFirstNumericByKeys(value, keys);
+    if (nested !== null) {
+      return nested;
+    }
+  }
+
+  return null;
+}
+
+function formatUsdc(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) {
+    return "N/A";
+  }
+  return `$${n.toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+}
+
+function getWalletSummary() {
+  const ctx = state.me?.trading_context || {};
+  const summary = ctx.wallet_summary || {};
+
+  let available = toNumber(summary.available_usdc);
+  let total = toNumber(summary.total_usdc);
+
+  if (available === null || total === null) {
+    const raw = ctx.dome_wallet;
+    if (available === null) {
+      available = findFirstNumericByKeys(raw, BALANCE_AVAILABLE_KEYS);
+    }
+    if (total === null) {
+      total = findFirstNumericByKeys(raw, BALANCE_TOTAL_KEYS);
+    }
+  }
+
+  return { available, total };
+}
+
+function renderWalletSummary() {
+  const box = $("walletSummary");
+  if (!state.me) {
+    box.textContent = "";
+    return;
+  }
+
+  const ctx = state.me.trading_context || {};
+  const { available, total } = getWalletSummary();
+  const lines = [];
+
+  if (ctx.mode === "proxy") {
+    lines.push(`Proxy/Safe: ${ctx.trading_address || "N/A"}`);
+  }
+
+  if (available !== null) {
+    lines.push(`Available USDC: ${formatUsdc(available)}`);
+  }
+
+  if (total !== null) {
+    lines.push(`Total USDC: ${formatUsdc(total)}`);
+  }
+
+  if (!lines.length) {
+    lines.push("Balance was not returned by provider for this wallet.");
+  }
+
+  box.textContent = lines.join("\n");
+}
+
+function marketQuestionText(market) {
+  return String(market?.question || market?.title || "").trim();
+}
+
+function outcomeLabel(market, side) {
+  const raw = side === "YES" ? market?.yes_label : market?.no_label;
+  const text = String(raw || "").trim();
+  return text || null;
+}
+
+function updateMarketUiState() {
+  const market = state.selectedMarket;
+  const outcome = $("outcome").value;
+  const yesOption = $("outcome").querySelector("option[value='YES']");
+  const noOption = $("outcome").querySelector("option[value='NO']");
+
+  if (!market) {
+    yesOption.textContent = "BUY YES";
+    noOption.textContent = "BUY NO";
+    setText("tokenStatus", "Select a market first.");
+    setText("marketQuestion", "");
+    setText("outcomeMeaning", "YES = market resolves TRUE. NO = market resolves FALSE.");
+    $("btnPlaceEntry").disabled = true;
+    return;
+  }
+
+  const yesLabel = outcomeLabel(market, "YES");
+  const noLabel = outcomeLabel(market, "NO");
+  yesOption.textContent = yesLabel ? `BUY YES (${yesLabel})` : "BUY YES";
+  noOption.textContent = noLabel ? `BUY NO (${noLabel})` : "BUY NO";
+
+  const hasYesToken = Boolean(market.yes_token_id && market.yes_token_id !== "None");
+  const hasNoToken = Boolean(market.no_token_id && market.no_token_id !== "None");
+
+  if (hasYesToken && hasNoToken) {
+    setText("tokenStatus", "Tokens are available for both outcomes. Market is tradable.");
+    $("btnPlaceEntry").disabled = false;
+  } else {
+    setText(
+      "tokenStatus",
+      "Token IDs are missing for this market. Usually this means market is not open for CLOB trading yet.",
+    );
+    $("btnPlaceEntry").disabled = true;
+  }
+
+  const question = marketQuestionText(market);
+  setText(
+    "marketQuestion",
+    question ? `Market question: ${question}` : "Market question is unavailable from provider response.",
+  );
+
+  const selectedLabel = outcomeLabel(market, outcome);
+  const generic =
+    outcome === "YES"
+      ? "BUY YES means you buy the outcome where market question resolves TRUE."
+      : "BUY NO means you buy the outcome where market question resolves FALSE.";
+  const detail = selectedLabel
+    ? ` Current selection maps to: ${selectedLabel}.`
+    : " Provider did not return explicit YES/NO labels.";
+  setText("outcomeMeaning", `${generic}${detail}`);
+}
+
+function selectMarket(market) {
+  state.selectedMarket = market;
+  $("marketId").value = market?.market_id || "";
+  $("marketTitle").value = market?.title || "";
+  $("yesToken").value = market?.yes_token_id || "";
+  $("noToken").value = market?.no_token_id || "";
+  updateMarketUiState();
+}
+
 function toMicro(amount) {
   const n = Number(amount);
   if (!Number.isFinite(n) || n <= 0) {
@@ -199,6 +413,8 @@ async function refreshMe() {
     "authState",
     `EOA: ${state.me.eoa_address}\nMode: ${state.me.trading_context.mode}\nTrading: ${state.me.trading_context.trading_address}`,
   );
+  renderWalletSummary();
+  updateMarketUiState();
 }
 
 async function handleConnect() {
@@ -251,6 +467,7 @@ async function handleConnect() {
     await refreshMe();
   } catch (err) {
     setText("authState", `Auth failed: ${err.message}`);
+    setText("walletSummary", "");
   }
 }
 
@@ -275,21 +492,27 @@ function renderSearchResults(markets) {
     meta.className = "mono";
     meta.textContent = `market_id=${m.market_id} | liq=${m.liquidity} | opp=${m.opportunity_score}`;
 
+    const question = document.createElement("div");
+    question.className = "mono";
+    question.textContent = `Q: ${marketQuestionText(m) || "n/a"}`;
+
     const tok = document.createElement("div");
     tok.className = "mono";
     tok.textContent = `YES=${m.yes_token_id || "N/A"}\nNO=${m.no_token_id || "N/A"}`;
 
+    const map = document.createElement("div");
+    map.className = "mono";
+    const yesLabel = outcomeLabel(m, "YES") || "question resolves TRUE";
+    const noLabel = outcomeLabel(m, "NO") || "question resolves FALSE";
+    map.textContent = `YES => ${yesLabel}\nNO => ${noLabel}`;
+
     const btn = document.createElement("button");
     btn.textContent = "Use This Market";
     btn.onclick = () => {
-      state.selectedMarket = m;
-      $("marketId").value = m.market_id || "";
-      $("marketTitle").value = m.title || "";
-      $("yesToken").value = m.yes_token_id || "";
-      $("noToken").value = m.no_token_id || "";
+      selectMarket(m);
     };
 
-    box.append(title, meta, tok, btn);
+    box.append(title, meta, question, tok, map, btn);
     container.appendChild(box);
   });
 }
@@ -383,7 +606,9 @@ function selectedTokenId() {
 
   const token = outcome === "YES" ? state.selectedMarket.yes_token_id : state.selectedMarket.no_token_id;
   if (!token || token === "None") {
-    throw new Error(`Selected market has no ${outcome} token id.`);
+    throw new Error(
+      `Selected market has no ${outcome} token id yet. This market is likely not open for trading.`,
+    );
   }
 
   return token;
@@ -534,12 +759,15 @@ function bindUi() {
   $("btnPlaceEntry").addEventListener("click", handlePlaceEntry);
   $("btnArmTp").addEventListener("click", handleArmTp);
   $("btnRefreshTp").addEventListener("click", handleRefreshTp);
+  $("outcome").addEventListener("change", updateMarketUiState);
 
   $("tpMode").addEventListener("change", () => {
     const mode = $("tpMode").value;
     $("tpSingle").classList.toggle("hidden", mode !== "single");
     $("tpLadder").classList.toggle("hidden", mode !== "ladder");
   });
+
+  updateMarketUiState();
 }
 
 bindUi();

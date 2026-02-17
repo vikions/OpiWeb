@@ -30,10 +30,13 @@ class VerifyRequest(BaseModel):
 class SearchResult(BaseModel):
     market_id: str
     title: str
+    question: Optional[str] = None
     liquidity: float = 0.0
     opportunity_score: float = 0.0
     yes_token_id: Optional[str] = None
     no_token_id: Optional[str] = None
+    yes_label: Optional[str] = None
+    no_label: Optional[str] = None
     source: str = "dome"
 
 

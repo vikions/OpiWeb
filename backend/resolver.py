@@ -24,6 +24,183 @@ _PROXY_KEYS = {
     "safe_address",
 }
 
+_AVAILABLE_BALANCE_KEYS = {
+    "available",
+    "available_balance",
+    "available_usdc",
+    "usdc_available",
+    "free",
+    "free_balance",
+    "spendable",
+    "buying_power",
+    "buyingpower",
+}
+
+_TOTAL_BALANCE_KEYS = {
+    "balance",
+    "total",
+    "total_balance",
+    "total_usdc",
+    "usdc_balance",
+    "cash_balance",
+    "collateral",
+    "equity",
+}
+
+_USDC_SCOPE_KEYS = {
+    "usdc",
+    "usd",
+    "cash",
+    "stablecoin",
+    "stablecoins",
+    "balances",
+}
+
+
+def _normalize_key(value: Any) -> str:
+    return str(value or "").strip().replace("-", "_").lower()
+
+
+def _to_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        cleaned = value.strip().replace(",", "")
+        if cleaned.startswith("$"):
+            cleaned = cleaned[1:]
+        if not cleaned:
+            return None
+        try:
+            return float(cleaned)
+        except Exception:
+            return None
+    return None
+
+
+def _find_first_numeric(obj: Any, keys: set[str]) -> Optional[float]:
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            if _normalize_key(key) in keys:
+                numeric = _to_float(value)
+                if numeric is not None:
+                    return numeric
+        for value in obj.values():
+            nested = _find_first_numeric(value, keys)
+            if nested is not None:
+                return nested
+    elif isinstance(obj, list):
+        for item in obj:
+            nested = _find_first_numeric(item, keys)
+            if nested is not None:
+                return nested
+    return None
+
+
+def _find_usdc_scope(obj: Any) -> Any:
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            if _normalize_key(key) in _USDC_SCOPE_KEYS:
+                return value
+        for value in obj.values():
+            nested = _find_usdc_scope(value)
+            if nested is not None:
+                return nested
+    elif isinstance(obj, list):
+        for item in obj:
+            nested = _find_usdc_scope(item)
+            if nested is not None:
+                return nested
+    return None
+
+
+def _extract_wallet_summary(wallet_data: Any) -> Optional[Dict[str, float]]:
+    if not isinstance(wallet_data, (dict, list)):
+        return None
+
+    scope = _find_usdc_scope(wallet_data)
+    search_target = scope if scope is not None else wallet_data
+
+    available = _find_first_numeric(search_target, _AVAILABLE_BALANCE_KEYS)
+    total = _find_first_numeric(search_target, _TOTAL_BALANCE_KEYS)
+
+    if available is None:
+        available = _find_first_numeric(wallet_data, _AVAILABLE_BALANCE_KEYS)
+    if total is None:
+        total = _find_first_numeric(wallet_data, _TOTAL_BALANCE_KEYS)
+
+    out: Dict[str, float] = {}
+    if available is not None:
+        out["available_usdc"] = round(float(available), 6)
+    if total is not None:
+        out["total_usdc"] = round(float(total), 6)
+    return out or None
+
+
+def _clean_label(value: Any) -> Optional[str]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    lower = text.lower()
+    if lower == "yes":
+        return "YES"
+    if lower == "no":
+        return "NO"
+    return text
+
+
+def _extract_outcome_labels_from_market(
+    market: Dict[str, Any],
+    yes_token: Optional[str],
+    no_token: Optional[str],
+) -> Tuple[Optional[str], Optional[str]]:
+    yes_label = _clean_label(
+        market.get("yes_label")
+        or market.get("yes_outcome")
+        or market.get("outcome_yes")
+        or market.get("yesOutcome")
+    )
+    no_label = _clean_label(
+        market.get("no_label")
+        or market.get("no_outcome")
+        or market.get("outcome_no")
+        or market.get("noOutcome")
+    )
+
+    dome_raw = market.get("dome_raw") if isinstance(market.get("dome_raw"), dict) else {}
+    side_a_id = dome_raw.get("side_a_id") or dome_raw.get("sideAId")
+    side_b_id = dome_raw.get("side_b_id") or dome_raw.get("sideBId")
+    side_a_label = _clean_label(dome_raw.get("side_a_label") or dome_raw.get("sideALabel"))
+    side_b_label = _clean_label(dome_raw.get("side_b_label") or dome_raw.get("sideBLabel"))
+
+    yes_token_str = str(yes_token) if yes_token is not None else None
+    no_token_str = str(no_token) if no_token is not None else None
+    side_a_id_str = str(side_a_id) if side_a_id is not None else None
+    side_b_id_str = str(side_b_id) if side_b_id is not None else None
+
+    if not yes_label and yes_token_str and side_a_id_str == yes_token_str:
+        yes_label = side_a_label
+    if not yes_label and yes_token_str and side_b_id_str == yes_token_str:
+        yes_label = side_b_label
+
+    if not no_label and no_token_str and side_a_id_str == no_token_str:
+        no_label = side_a_label
+    if not no_label and no_token_str and side_b_id_str == no_token_str:
+        no_label = side_b_label
+
+    if not yes_label and side_a_label and side_a_label.lower() == "yes":
+        yes_label = side_a_label
+    if not yes_label and side_b_label and side_b_label.lower() == "yes":
+        yes_label = side_b_label
+
+    if not no_label and side_a_label and side_a_label.lower() == "no":
+        no_label = side_a_label
+    if not no_label and side_b_label and side_b_label.lower() == "no":
+        no_label = side_b_label
+
+    return yes_label, no_label
+
 
 def _normalize_addr(value: Any) -> Optional[str]:
     if not isinstance(value, str):
@@ -199,6 +376,7 @@ class TradingContextResolver:
             "chain_id": CHAIN_ID,
             "exchange_address": DEFAULT_EXCHANGE_ADDRESS,
             "dome_wallet": None,
+            "wallet_summary": None,
         }
 
         if not self._dome:
@@ -207,6 +385,7 @@ class TradingContextResolver:
         try:
             wallet_data = self._dome.get_wallet(eoa=eoa_address)
             context["dome_wallet"] = wallet_data
+            context["wallet_summary"] = _extract_wallet_summary(wallet_data)
 
             proxy = _find_proxy_in_obj(wallet_data, eoa_lower)
             if not proxy:
@@ -242,6 +421,7 @@ class TradingContextResolver:
         rows: List[Dict[str, Any]] = []
         for market in found:
             market_id = str(market.get("market_id") or "")
+            question = str(market.get("question") or market.get("title") or "").strip()
             yes_token, no_token = _extract_token_ids_from_market(market)
 
             if (not yes_token or not no_token) and market_id:
@@ -254,14 +434,23 @@ class TradingContextResolver:
                 yes_token = yes_token or str((cfg.get("tokens") or {}).get("yes"))
                 no_token = no_token or str((cfg.get("tokens") or {}).get("no"))
 
+            yes_label, no_label = _extract_outcome_labels_from_market(
+                market=market,
+                yes_token=yes_token,
+                no_token=no_token,
+            )
+
             rows.append(
                 {
                     "market_id": market_id,
-                    "title": str(market.get("question") or market.get("title") or "Untitled"),
+                    "title": str(market.get("title") or question or "Untitled"),
+                    "question": question or None,
                     "liquidity": float(market.get("liquidity") or 0),
                     "opportunity_score": float(market.get("opportunity_score") or 0),
                     "yes_token_id": yes_token,
                     "no_token_id": no_token,
+                    "yes_label": yes_label,
+                    "no_label": no_label,
                     "source": "dome",
                 }
             )

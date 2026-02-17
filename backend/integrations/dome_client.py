@@ -78,6 +78,7 @@ class DomeClient:
             or ""
         )
         title = str(g(market, "title") or g(market, "question") or "Untitled")
+        question = str(g(market, "question") or title)
 
         volume_total = self._to_float(g(market, "volume_total"), 0.0)
         volume_week = self._to_float(g(market, "volume_1_week"), 0.0)
@@ -110,7 +111,7 @@ class DomeClient:
             "market_id": market_id,
             "market_slug": str(g(market, "market_slug") or ""),
             "title": title,
-            "question": title,
+            "question": question,
             "liquidity": liquidity,
             "current_yes_price": yes_price,
             "current_no_price": no_price,
@@ -119,6 +120,8 @@ class DomeClient:
             "opportunity_score": opportunity_score,
             "active": bool((g(market, "end_time") or time.time() + 1) > time.time()),
             "tags": g(market, "tags") or [],
+            "yes_label": g(market, "yes_label") or g(market, "yes_outcome"),
+            "no_label": g(market, "no_label") or g(market, "no_outcome"),
             "dome_raw": {
                 "condition_id": g(market, "condition_id"),
                 "side_a_id": side_a_id,
