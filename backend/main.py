@@ -264,6 +264,22 @@ def get_token_meta(
         tick_size = str(public_clob.get_tick_size(token_id))
         fee_rate_bps = int(public_clob.get_fee_rate_bps(token_id) or 0)
         exchange_address = get_contract_config(CHAIN_ID, neg_risk).exchange
+        min_order_size = None
+        market = None
+        best_bid = None
+        best_ask = None
+        try:
+            book = public_clob.get_order_book(token_id)
+            market = getattr(book, "market", None)
+            min_order_size = str(getattr(book, "min_order_size", None) or "") or None
+            bids = list(getattr(book, "bids", None) or [])
+            asks = list(getattr(book, "asks", None) or [])
+            if bids:
+                best_bid = str(getattr(bids[0], "price", None) or "") or None
+            if asks:
+                best_ask = str(getattr(asks[0], "price", None) or "") or None
+        except Exception:
+            pass
         return {
             "token_id": str(token_id),
             "chain_id": CHAIN_ID,
@@ -271,6 +287,10 @@ def get_token_meta(
             "tick_size": tick_size,
             "fee_rate_bps": fee_rate_bps,
             "exchange_address": exchange_address,
+            "market": market,
+            "min_order_size": min_order_size,
+            "best_bid": best_bid,
+            "best_ask": best_ask,
         }
     except PolyApiException as exc:
         raise _poly_api_error_to_http(exc, fallback_status=400) from exc

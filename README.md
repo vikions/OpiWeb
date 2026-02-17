@@ -64,6 +64,8 @@ Optional:
 - `WEB_EXPERIMENT_TP_POLL_SECONDS=2`
 - `WEB_EXPERIMENT_TP_MAX_MINUTES=30`
 - `DOME_BASE_URL=https://api.domeapi.io/v1`
+- `WEB_EXPERIMENT_FORCE_SIGNATURE_TYPE=0|1|2` (debug override)
+- `WEB_EXPERIMENT_FORCE_TRADING_ADDRESS=0x...` (debug override)
 
 Notes:
 

@@ -120,6 +120,14 @@ function toNumber(value) {
   return null;
 }
 
+function toPositiveNumberOrNull(value) {
+  const n = toNumber(value);
+  if (n === null || !Number.isFinite(n) || n <= 0) {
+    return null;
+  }
+  return n;
+}
+
 function findFirstNumericByKeys(obj, keys) {
   if (!obj || typeof obj !== "object") {
     return null;
@@ -771,6 +779,13 @@ async function handlePlaceEntry() {
       tickSize,
     });
 
+    const minOrderSize = toPositiveNumberOrNull(tokenMeta.min_order_size);
+    if (minOrderSize !== null && amounts.normalizedSizeTokens + 1e-9 < minOrderSize) {
+      throw new Error(
+        `Order size is too small for this market. Min size is ${minOrderSize} tokens, current size is ${amounts.normalizedSizeTokens}. Increase Size USDC.`,
+      );
+    }
+
     const normalizedSizeUsdc = Number(amounts.makerAmount) / 1e6;
     const unsigned = buildUnsignedOrder({
       tokenId,
@@ -813,7 +828,7 @@ async function handlePlaceEntry() {
     $("entryOrderId").value = result.order_id || "";
     setText(
       "entryState",
-      `Entry order submitted: ${result.order_id} | neg_risk=${tokenMeta.neg_risk ? "yes" : "no"} | tick=${tokenMeta.tick_size} | fee=${feeRateBps}`,
+      `Entry order submitted: ${result.order_id} | neg_risk=${tokenMeta.neg_risk ? "yes" : "no"} | tick=${tokenMeta.tick_size} | fee=${feeRateBps} | min_size=${tokenMeta.min_order_size || "n/a"}`,
     );
     setJSON("entryBox", result);
   } catch (err) {

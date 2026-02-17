@@ -10,6 +10,7 @@ from .integrations.dome_client import DomeClient
 from .integrations.market_fallback import get_all_markets
 
 from .config import CHAIN_ID, DEFAULT_EXCHANGE_ADDRESS
+from .config import FORCE_SIGNATURE_TYPE, FORCE_TRADING_ADDRESS
 
 
 _ADDRESS_RE = re.compile(r"0x[a-fA-F0-9]{40}")
@@ -379,7 +380,21 @@ class TradingContextResolver:
             "wallet_summary": None,
         }
 
+        forced_trading = FORCE_TRADING_ADDRESS if is_address(FORCE_TRADING_ADDRESS or "") else None
+        if forced_trading:
+            context.update(
+                {
+                    "trading_address": forced_trading,
+                    "funder_address": forced_trading,
+                    "signature_type": int(FORCE_SIGNATURE_TYPE if FORCE_SIGNATURE_TYPE is not None else 2),
+                    "mode": "forced",
+                }
+            )
+            return context
+
         if not self._dome:
+            if FORCE_SIGNATURE_TYPE is not None:
+                context["signature_type"] = int(FORCE_SIGNATURE_TYPE)
             return context
 
         try:
@@ -402,6 +417,9 @@ class TradingContextResolver:
                 )
         except Exception as exc:
             context["resolver_warning"] = str(exc)
+
+        if FORCE_SIGNATURE_TYPE is not None:
+            context["signature_type"] = int(FORCE_SIGNATURE_TYPE)
 
         return context
 
