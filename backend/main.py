@@ -4,6 +4,9 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from py_clob_client.client import ClobClient
+from py_clob_client.config import get_contract_config
+from py_clob_client.exceptions import PolyApiException
 from fastapi import Cookie, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -14,6 +17,7 @@ from .config import (
     AUTH_RATE_LIMIT_MAX_REQUESTS,
     AUTH_RATE_LIMIT_WINDOW_SECONDS,
     CHAIN_ID,
+    CLOB_HOST,
     SESSION_COOKIE_NAME,
     WEB_EXPERIMENT_ENABLED,
 )
@@ -36,6 +40,7 @@ if not WEB_EXPERIMENT_ENABLED:
 store = InMemoryStore()
 resolver = TradingContextResolver()
 tp_engine = TpEngine(store)
+public_clob = ClobClient(host=CLOB_HOST, chain_id=CHAIN_ID)
 
 app = FastAPI(title="OpiPoliX Web Experiment", version="0.1.0")
 
@@ -91,6 +96,30 @@ def _calc_order_size_tokens(signed_order: Dict[str, Any]) -> float:
     if side == "BUY":
         return taker_amount / 1e6
     return maker_amount / 1e6
+
+
+def _poly_api_error_to_http(exc: PolyApiException, fallback_status: int = 400) -> HTTPException:
+    status_raw = getattr(exc, "status_code", None)
+    status_code = int(status_raw) if isinstance(status_raw, int) and status_raw > 0 else fallback_status
+    status_code = max(400, min(status_code, 599))
+
+    payload = getattr(exc, "error_msg", None)
+    if isinstance(payload, dict):
+        message = (
+            str(payload.get("error") or "")
+            or str(payload.get("message") or "")
+            or str(payload)
+        )
+    else:
+        message = str(payload or exc)
+
+    if "Invalid order payload" in message:
+        message += (
+            ". Check token tradability, price tick-size, signatureType, and exchange contract "
+            "(regular vs neg-risk)."
+        )
+
+    return HTTPException(status_code=status_code, detail=message)
 
 
 def _validate_signed_order(
@@ -223,6 +252,29 @@ def search_markets(
     return resolver.search(query, limit=20)
 
 
+@app.get("/api/token/meta")
+def get_token_meta(
+    token_id: str = Query(..., min_length=10, max_length=200),
+    session: Dict[str, Any] = Depends(_session_from_cookie),
+):
+    _ = session
+    try:
+        neg_risk = bool(public_clob.get_neg_risk(token_id))
+        tick_size = str(public_clob.get_tick_size(token_id))
+        exchange_address = get_contract_config(CHAIN_ID, neg_risk).exchange
+        return {
+            "token_id": str(token_id),
+            "chain_id": CHAIN_ID,
+            "neg_risk": neg_risk,
+            "tick_size": tick_size,
+            "exchange_address": exchange_address,
+        }
+    except PolyApiException as exc:
+        raise _poly_api_error_to_http(exc, fallback_status=400) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Failed to load token metadata: {exc}") from exc
+
+
 @app.post("/api/order/limit")
 def place_limit_order(
     payload: LimitOrderRequest,
@@ -246,10 +298,17 @@ def place_limit_order(
         signature_type=int(context.get("signature_type") or 0),
     )
 
-    result = client.post_signed_order(
-        signed_order=payload.signed_order,
-        order_type=payload.order_type,
-    )
+    try:
+        result = client.post_signed_order(
+            signed_order=payload.signed_order,
+            order_type=payload.order_type,
+        )
+    except PolyApiException as exc:
+        raise _poly_api_error_to_http(exc, fallback_status=400) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Failed to post order: {exc}") from exc
 
     order_id = result.get("order_id")
     entry_size_tokens = payload.size_tokens

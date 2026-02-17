@@ -4,6 +4,7 @@ const state = {
   selectedMarket: null,
   lastEntry: null,
   lastArmId: null,
+  tokenMetaByTokenId: {},
 };
 
 const ZERO = "0x0000000000000000000000000000000000000000";
@@ -307,10 +308,24 @@ async function api(path, options = {}) {
   });
 
   const text = await resp.text();
-  const data = text ? JSON.parse(text) : {};
+  let data = {};
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = { raw: text };
+    }
+  }
 
   if (!resp.ok) {
-    throw new Error(data.detail || `HTTP ${resp.status}`);
+    const detail =
+      data?.detail ||
+      data?.error ||
+      data?.message ||
+      data?.raw ||
+      text ||
+      `HTTP ${resp.status}`;
+    throw new Error(detail);
   }
 
   return data;
@@ -530,13 +545,33 @@ async function handleSearch() {
   }
 }
 
-function orderDomain() {
+async function getTokenMeta(tokenId) {
+  const key = String(tokenId || "");
+  if (!key) {
+    throw new Error("token_id is required.");
+  }
+
+  if (state.tokenMetaByTokenId[key]) {
+    return state.tokenMetaByTokenId[key];
+  }
+
+  const meta = await api(`/api/token/meta?token_id=${encodeURIComponent(key)}`, {
+    method: "GET",
+  });
+  state.tokenMetaByTokenId[key] = meta;
+  return meta;
+}
+
+function orderDomain(exchangeAddressOverride = null) {
   const ctx = state.me?.trading_context || {};
   return {
     name: "Polymarket CTF Exchange",
     version: "1",
     chainId: Number(ctx.chain_id || 137),
-    verifyingContract: ctx.exchange_address || "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E",
+    verifyingContract:
+      exchangeAddressOverride ||
+      ctx.exchange_address ||
+      "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E",
   };
 }
 
@@ -571,11 +606,12 @@ function buildUnsignedOrder({ tokenId, side, price, sizeTokens, nonceOverride })
   };
 }
 
-async function signOrder(unsignedOrder) {
+async function signOrder(unsignedOrder, options = {}) {
+  const exchangeAddress = options.exchangeAddress || null;
   const typed = {
     types: ORDER_TYPES,
     primaryType: "Order",
-    domain: orderDomain(),
+    domain: orderDomain(exchangeAddress),
     message: unsignedOrder,
   };
 
@@ -632,13 +668,16 @@ async function handlePlaceEntry() {
     }
 
     const sizeTokens = sizeUsdc / price;
+    const tokenMeta = await getTokenMeta(tokenId);
     const unsigned = buildUnsignedOrder({
       tokenId,
       side: "BUY",
       price,
       sizeTokens,
     });
-    const signedOrder = await signOrder(unsigned);
+    const signedOrder = await signOrder(unsigned, {
+      exchangeAddress: tokenMeta.exchange_address,
+    });
 
     const result = await api("/api/order/limit", {
       method: "POST",
@@ -660,11 +699,17 @@ async function handlePlaceEntry() {
       token_id: tokenId,
       size_tokens: Number(result.entry_size_tokens || sizeTokens),
       entry_price: price,
+      exchange_address: tokenMeta.exchange_address,
+      neg_risk: Boolean(tokenMeta.neg_risk),
+      tick_size: tokenMeta.tick_size,
       signed_order: signedOrder,
     };
 
     $("entryOrderId").value = result.order_id || "";
-    setText("entryState", `Entry order submitted: ${result.order_id}`);
+    setText(
+      "entryState",
+      `Entry order submitted: ${result.order_id} | neg_risk=${tokenMeta.neg_risk ? "yes" : "no"} | tick=${tokenMeta.tick_size}`,
+    );
     setJSON("entryBox", result);
   } catch (err) {
     setText("entryState", `Entry failed: ${err.message}`);
@@ -701,6 +746,7 @@ async function handleArmTp() {
       throw new Error("TP percentages must sum to 100");
     }
 
+    const tokenMeta = await getTokenMeta(state.lastEntry.token_id);
     const signedTpOrders = [];
     for (let i = 0; i < levels.length; i += 1) {
       const lv = levels[i];
@@ -711,7 +757,9 @@ async function handleArmTp() {
         price: lv.price,
         sizeTokens: tpTokens,
       });
-      const signedTp = await signOrder(unsignedTp);
+      const signedTp = await signOrder(unsignedTp, {
+        exchangeAddress: tokenMeta.exchange_address,
+      });
       signedTpOrders.push({
         level_index: i,
         order_type: "GTC",
