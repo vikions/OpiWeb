@@ -754,13 +754,13 @@ async function handlePlaceEntry() {
 
     const tokenId = selectedTokenId();
     const price = Number($("price").value);
-    const sizeUsdc = Number($("sizeUsdc").value);
+    const sizeTokens = Number($("sizeTokens").value);
 
     if (!(price > 0 && price < 1)) {
       throw new Error("Price must be in range (0,1)");
     }
-    if (!(sizeUsdc > 0)) {
-      throw new Error("Size USDC must be > 0");
+    if (!(sizeTokens > 0)) {
+      throw new Error("Size (Shares) must be > 0");
     }
 
     const tokenMeta = await getTokenMeta(tokenId);
@@ -768,10 +768,9 @@ async function handlePlaceEntry() {
     const feeRateBps = Number(tokenMeta.fee_rate_bps || 0);
     validatePriceAgainstTick(price, tickSize);
 
-    const requestedSizeTokens = sizeUsdc / price;
     const amounts = computeOrderAmounts({
       side: "BUY",
-      sizeTokens: requestedSizeTokens,
+      sizeTokens,
       price,
       tickSize,
     });
@@ -780,7 +779,7 @@ async function handlePlaceEntry() {
     const minOrderSize = toPositiveNumberOrNull(tokenMeta.min_order_size);
     if (minOrderSize !== null && normalizedSizeUsdc + 1e-9 < minOrderSize) {
       throw new Error(
-        `Order is below market minimum after rounding. Min is ${minOrderSize} USDC, current maker amount is ${normalizedSizeUsdc.toFixed(6)} USDC. Increase Size USDC.`,
+        `Order is below market minimum after rounding. Min is ${minOrderSize} USDC, current maker amount is ${normalizedSizeUsdc.toFixed(6)} USDC. Increase Size (Shares).`,
       );
     }
     const unsigned = buildUnsignedOrder({
