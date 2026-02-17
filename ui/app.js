@@ -525,7 +525,7 @@ async function refreshMe() {
   setJSON("meBox", state.me);
   setText(
     "authState",
-    `EOA: ${state.me.eoa_address}\nMode: ${state.me.trading_context.mode}\nTrading: ${state.me.trading_context.trading_address}`,
+    `EOA: ${state.me.eoa_address}\nMode: ${state.me.trading_context.mode}\nTrading: ${state.me.trading_context.trading_address}\nOrder signing: ${state.me.server_signing ? "server" : "wallet"}`,
   );
   renderWalletSummary();
   updateMarketUiState();
@@ -782,16 +782,19 @@ async function handlePlaceEntry() {
         `Order is below market minimum after rounding. Min is ${minOrderSize} USDC, current maker amount is ${normalizedSizeUsdc.toFixed(6)} USDC. Increase Size (Shares).`,
       );
     }
-    const unsigned = buildUnsignedOrder({
-      tokenId,
-      side: "BUY",
-      makerAmount: amounts.makerAmount,
-      takerAmount: amounts.takerAmount,
-      feeRateBps,
-    });
-    const signedOrder = await signOrder(unsigned, {
-      exchangeAddress: tokenMeta.exchange_address,
-    });
+    let signedOrder = null;
+    if (!state.me.server_signing) {
+      const unsigned = buildUnsignedOrder({
+        tokenId,
+        side: "BUY",
+        makerAmount: amounts.makerAmount,
+        takerAmount: amounts.takerAmount,
+        feeRateBps,
+      });
+      signedOrder = await signOrder(unsigned, {
+        exchangeAddress: tokenMeta.exchange_address,
+      });
+    }
 
     const result = await api("/api/order/limit", {
       method: "POST",
@@ -817,7 +820,7 @@ async function handlePlaceEntry() {
       neg_risk: Boolean(tokenMeta.neg_risk),
       tick_size: tokenMeta.tick_size,
       fee_rate_bps: feeRateBps,
-      signed_order: signedOrder,
+      signed_order: signedOrder || undefined,
     };
 
     $("entryOrderId").value = result.order_id || "";

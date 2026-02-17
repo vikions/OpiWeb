@@ -3,12 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
+from eth_account import Account
 from eth_utils import is_address, to_checksum_address
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import (
     ApiCreds,
     BalanceAllowanceParams,
     OpenOrderParams,
+    OrderArgs,
     OrderType,
 )
 
@@ -112,12 +114,21 @@ class Level2SessionClobClient:
         creds: Dict[str, str],
         funder_address: Optional[str] = None,
         signature_type: int = 0,
+        private_key: Optional[str] = None,
     ):
         if not is_address(eoa_address):
             raise ValueError("Invalid eoa_address")
 
         if funder_address and not is_address(funder_address):
             raise ValueError("Invalid funder_address")
+
+        key_to_use = _DUMMY_PRIVATE_KEY
+        self._signer_address = eoa_address
+        if private_key:
+            key_to_use = str(private_key).strip()
+            if not key_to_use.startswith("0x"):
+                key_to_use = f"0x{key_to_use}"
+            self._signer_address = Account.from_key(key_to_use).address
 
         api_creds = ApiCreds(
             api_key=creds["api_key"],
@@ -128,14 +139,18 @@ class Level2SessionClobClient:
         self.client = ClobClient(
             host=CLOB_HOST,
             chain_id=CHAIN_ID,
-            key=_DUMMY_PRIVATE_KEY,
+            key=key_to_use,
             creds=api_creds,
             signature_type=signature_type,
             funder=funder_address,
             builder_config=build_builder_config(),
         )
 
-        self.client.signer = SessionAddressSigner(eoa_address, CHAIN_ID)
+        if not private_key:
+            self.client.signer = SessionAddressSigner(eoa_address, CHAIN_ID)
+
+    def signer_address(self) -> str:
+        return self._signer_address
 
     def post_signed_order(
         self,
@@ -150,6 +165,31 @@ class Level2SessionClobClient:
             "status": "success",
             "order_id": normalize_order_id(response),
             "response": response,
+        }
+
+    def create_and_post_limit_order(
+        self,
+        token_id: str,
+        price: float,
+        size_tokens: float,
+        side: str = "BUY",
+        order_type: str = "GTC",
+    ) -> Dict[str, Any]:
+        order_args = OrderArgs(
+            token_id=str(token_id),
+            price=float(price),
+            size=float(size_tokens),
+            side=_normalize_side(side),
+        )
+        signed = self.client.create_order(order_args)
+        type_name = (order_type or "GTC").upper()
+        post_type = getattr(OrderType, type_name, OrderType.GTC)
+        response = self.client.post_order(signed, post_type)
+        return {
+            "status": "success",
+            "order_id": normalize_order_id(response),
+            "response": response,
+            "signed_order": signed.dict(),
         }
 
     def get_order(self, order_id: str) -> Dict[str, Any]:

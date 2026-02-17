@@ -49,11 +49,13 @@ class LimitOrderRequest(BaseModel):
     size_tokens: Optional[float] = Field(default=None, gt=0)
     order_type: Literal["GTC", "GTD", "FOK", "FAK"] = "GTC"
     idempotency_key: Optional[str] = None
-    signed_order: Dict[str, Any]
+    signed_order: Optional[Dict[str, Any]] = None
 
     @field_validator("signed_order")
     @classmethod
-    def validate_signed_order(cls, value: Dict[str, Any]) -> Dict[str, Any]:
+    def validate_signed_order(cls, value: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if value is None:
+            return value
         required = [
             "salt",
             "maker",

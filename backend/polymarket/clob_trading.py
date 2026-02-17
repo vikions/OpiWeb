@@ -24,7 +24,7 @@ def _read_builder_env() -> dict[str, Optional[str]]:
     }
 
 
-def build_builder_config() -> BuilderConfig:
+def build_builder_config() -> Optional[BuilderConfig]:
     env = _read_builder_env()
 
     if env["api_key"] and env["api_secret"] and env["api_passphrase"]:
@@ -41,11 +41,7 @@ def build_builder_config() -> BuilderConfig:
             remote_builder_config=RemoteBuilderConfig(url=str(env["signing_url"]))
         )
 
-    raise ValueError(
-        "Builder credentials are not configured. Set BUILDER_API_KEY/BUILDER_API_SECRET/"
-        "BUILDER_API_PASSPHRASE (or BUILDER_SECRET/BUILDER_PASS_PHRASE), "
-        "or set BUILDER_SIGNING_URL."
-    )
+    return None
 
 
 def normalize_order_id(response: Any) -> Optional[str]:
