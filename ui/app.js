@@ -389,14 +389,11 @@ function computeOrderAmounts({ side, sizeTokens, price, tickSize }) {
   };
 }
 
-function randomUint(bits = 256) {
-  const bytes = Math.ceil(bits / 8);
-  const arr = new Uint8Array(bytes);
-  crypto.getRandomValues(arr);
-  const hex = Array.from(arr)
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-  return BigInt(`0x${hex}`).toString();
+function randomSalt() {
+  // Keep salt within JS safe-integer range because CLOB expects JSON number.
+  const now = Math.floor(Date.now() / 1000);
+  const rand = Math.floor(Math.random() * 1_000_000);
+  return String(now * rand);
 }
 
 async function api(path, options = {}) {
@@ -690,7 +687,7 @@ function buildUnsignedOrder({
   const signatureType = Number(ctx.signature_type || 0);
 
   return {
-    salt: randomUint(256),
+    salt: randomSalt(),
     maker: ctx.trading_address,
     signer: state.me.eoa_address,
     taker: ZERO,

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
-from eth_utils import is_address
+from eth_utils import is_address, to_checksum_address
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import (
     ApiCreds,
@@ -17,6 +17,69 @@ from .polymarket.clob_trading import build_builder_config, normalize_order_id
 from .config import CHAIN_ID, CLOB_HOST
 
 _DUMMY_PRIVATE_KEY = "0x" + "1" * 64
+_MAX_SAFE_JSON_INT = 9_007_199_254_740_991
+
+
+def _to_int(value: Any, field: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be integer-like, got bool")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if text.startswith("0x") or text.startswith("0X"):
+            return int(text, 16)
+        return int(text)
+    return int(value)
+
+
+def _normalize_side(value: Any) -> str:
+    if isinstance(value, str):
+        text = value.strip().upper()
+        if text in {"BUY", "SELL"}:
+            return text
+    n = _to_int(value, "side")
+    if n == 0:
+        return "BUY"
+    if n == 1:
+        return "SELL"
+    raise ValueError(f"side must be BUY/SELL or 0/1, got {value!r}")
+
+
+def _normalize_addr(value: Any, field: str) -> str:
+    text = str(value or "").strip()
+    if not is_address(text):
+        raise ValueError(f"{field} is not a valid address: {value!r}")
+    return to_checksum_address(text)
+
+
+def _normalize_signed_order_payload(signed_order: Dict[str, Any]) -> Dict[str, Any]:
+    signature = str(signed_order.get("signature") or "").strip()
+    if not signature:
+        raise ValueError("signature is required")
+
+    salt = _to_int(signed_order.get("salt"), "salt")
+    if salt < 0 or salt > _MAX_SAFE_JSON_INT:
+        raise ValueError(
+            f"salt must be in [0, {_MAX_SAFE_JSON_INT}] for CLOB JSON payload compatibility"
+        )
+
+    normalized = {
+        "salt": salt,
+        "maker": _normalize_addr(signed_order.get("maker"), "maker"),
+        "signer": _normalize_addr(signed_order.get("signer"), "signer"),
+        "taker": _normalize_addr(signed_order.get("taker"), "taker"),
+        "tokenId": str(_to_int(signed_order.get("tokenId"), "tokenId")),
+        "makerAmount": str(_to_int(signed_order.get("makerAmount"), "makerAmount")),
+        "takerAmount": str(_to_int(signed_order.get("takerAmount"), "takerAmount")),
+        "expiration": str(_to_int(signed_order.get("expiration"), "expiration")),
+        "nonce": str(_to_int(signed_order.get("nonce"), "nonce")),
+        "feeRateBps": str(_to_int(signed_order.get("feeRateBps"), "feeRateBps")),
+        "side": _normalize_side(signed_order.get("side")),
+        "signatureType": int(_to_int(signed_order.get("signatureType"), "signatureType")),
+        "signature": signature,
+    }
+    return normalized
 
 
 class SessionAddressSigner:
@@ -39,7 +102,7 @@ class SignedOrderPayload:
     order_data: Dict[str, Any]
 
     def dict(self):
-        return dict(self.order_data)
+        return _normalize_signed_order_payload(self.order_data)
 
 
 class Level2SessionClobClient:
