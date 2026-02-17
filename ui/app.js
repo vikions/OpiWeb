@@ -824,6 +824,7 @@ async function handlePlaceEntry() {
     };
 
     $("entryOrderId").value = result.order_id || "";
+    $("cancelOrderId").value = result.order_id || "";
     setText(
       "entryState",
       `Entry order submitted: ${result.order_id} | neg_risk=${tokenMeta.neg_risk ? "yes" : "no"} | tick=${tokenMeta.tick_size} | fee=${feeRateBps} | min_size=${tokenMeta.min_order_size || "n/a"}`,
@@ -831,6 +832,31 @@ async function handlePlaceEntry() {
     setJSON("entryBox", result);
   } catch (err) {
     setText("entryState", `Entry failed: ${err.message}`);
+  }
+}
+
+async function handleCancelOrder() {
+  try {
+    const orderId =
+      String(
+        $("cancelOrderId").value ||
+          $("entryOrderId").value ||
+          state.lastEntry?.order_id ||
+          "",
+      ).trim();
+    if (!orderId) {
+      throw new Error("Enter order ID to cancel.");
+    }
+
+    const res = await api("/api/order/cancel", {
+      method: "POST",
+      body: JSON.stringify({ order_id: orderId }),
+    });
+
+    setText("entryState", `Order cancel requested: ${orderId}`);
+    setJSON("entryBox", res);
+  } catch (err) {
+    setText("entryState", `Cancel failed: ${err.message}`);
   }
 }
 
@@ -940,6 +966,7 @@ function bindUi() {
   $("btnConnect").addEventListener("click", handleConnect);
   $("btnSearch").addEventListener("click", handleSearch);
   $("btnPlaceEntry").addEventListener("click", handlePlaceEntry);
+  $("btnCancelOrder").addEventListener("click", handleCancelOrder);
   $("btnArmTp").addEventListener("click", handleArmTp);
   $("btnRefreshTp").addEventListener("click", handleRefreshTp);
   $("outcome").addEventListener("change", updateMarketUiState);

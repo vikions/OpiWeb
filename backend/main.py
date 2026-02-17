@@ -26,6 +26,7 @@ from .config import (
     WEB_EXPERIMENT_ENABLED,
 )
 from .models import (
+    CancelOrderRequest,
     LimitOrderRequest,
     NonceRequest,
     NonceResponse,
@@ -265,6 +266,16 @@ def _poly_api_error_to_http(exc: PolyApiException, fallback_status: int = 400) -
     return HTTPException(status_code=status_code, detail=message)
 
 
+def _get_order_snapshot(client: Level2SessionClobClient, order_id: Optional[str]) -> Dict[str, Any]:
+    if not order_id:
+        return {"ok": False, "reason": "missing_order_id"}
+    try:
+        payload = client.get_order(order_id)
+        return {"ok": True, "order": payload.get("order")}
+    except Exception as exc:
+        return {"ok": False, "reason": str(exc)}
+
+
 def _validate_signed_order(
     signed_order: Dict[str, Any],
     session: Dict[str, Any],
@@ -474,6 +485,78 @@ def get_token_allowance(
         ) from exc
 
 
+@app.get("/api/order")
+def get_order_by_id(
+    order_id: str = Query(..., min_length=6, max_length=200),
+    session: Dict[str, Any] = Depends(_session_from_cookie),
+):
+    context = session["trading_context"]
+    client = Level2SessionClobClient(
+        eoa_address=session["eoa_address"],
+        creds=session["clob_creds"],
+        funder_address=context.get("funder_address"),
+        signature_type=int(context.get("signature_type") or 0),
+        private_key=SERVER_SIGNING_PRIVATE_KEY,
+    )
+    try:
+        return client.get_order(order_id)
+    except PolyApiException as exc:
+        raise _poly_api_error_to_http(exc, fallback_status=400) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Failed to load order: {exc}") from exc
+
+
+@app.get("/api/orders/open")
+def get_open_orders(
+    market: Optional[str] = Query(default=None, min_length=1, max_length=120),
+    asset_id: Optional[str] = Query(default=None, min_length=6, max_length=200),
+    session: Dict[str, Any] = Depends(_session_from_cookie),
+):
+    context = session["trading_context"]
+    client = Level2SessionClobClient(
+        eoa_address=session["eoa_address"],
+        creds=session["clob_creds"],
+        funder_address=context.get("funder_address"),
+        signature_type=int(context.get("signature_type") or 0),
+        private_key=SERVER_SIGNING_PRIVATE_KEY,
+    )
+    try:
+        return client.get_open_orders(market=market, asset_id=asset_id)
+    except PolyApiException as exc:
+        raise _poly_api_error_to_http(exc, fallback_status=400) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Failed to load open orders: {exc}") from exc
+
+
+@app.post("/api/order/cancel")
+def cancel_order(
+    payload: CancelOrderRequest,
+    session: Dict[str, Any] = Depends(_session_from_cookie),
+):
+    context = session["trading_context"]
+    client = Level2SessionClobClient(
+        eoa_address=session["eoa_address"],
+        creds=session["clob_creds"],
+        funder_address=context.get("funder_address"),
+        signature_type=int(context.get("signature_type") or 0),
+        private_key=SERVER_SIGNING_PRIVATE_KEY,
+    )
+    try:
+        cancelled = client.cancel_order(payload.order_id)
+    except PolyApiException as exc:
+        raise _poly_api_error_to_http(exc, fallback_status=400) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Failed to cancel order: {exc}") from exc
+
+    snapshot = _get_order_snapshot(client, payload.order_id)
+    return {
+        "status": "success",
+        "order_id": payload.order_id,
+        "cancel": cancelled.get("response"),
+        "order_snapshot": snapshot,
+    }
+
+
 @app.post("/api/order/limit")
 def place_limit_order(
     payload: LimitOrderRequest,
@@ -540,6 +623,7 @@ def place_limit_order(
 
         order_id = result.get("order_id")
         entry_size_tokens = float(payload.size_tokens)
+        order_snapshot = _get_order_snapshot(client, order_id)
 
         print(
             "[WEB_EXPERIMENT] limit_order_server_signing",
@@ -551,6 +635,12 @@ def place_limit_order(
                 "price": payload.price,
                 "order_id": order_id,
                 "entry_size_tokens": entry_size_tokens,
+                "snapshot_ok": order_snapshot.get("ok"),
+                "snapshot_status": (
+                    (order_snapshot.get("order") or {}).get("status")
+                    if isinstance(order_snapshot.get("order"), dict)
+                    else None
+                ),
             },
         )
 
@@ -559,6 +649,7 @@ def place_limit_order(
             "order_id": order_id,
             "entry_size_tokens": entry_size_tokens,
             "raw": result.get("response"),
+            "order_snapshot": order_snapshot,
         }
 
     if not payload.signed_order:
@@ -630,6 +721,7 @@ def place_limit_order(
     entry_size_tokens = payload.size_tokens
     if entry_size_tokens is None:
         entry_size_tokens = _calc_order_size_tokens(payload.signed_order)
+    order_snapshot = _get_order_snapshot(client, order_id)
 
     print(
         "[WEB_EXPERIMENT] limit_order",
@@ -641,6 +733,12 @@ def place_limit_order(
             "price": payload.price,
             "order_id": order_id,
             "entry_size_tokens": entry_size_tokens,
+            "snapshot_ok": order_snapshot.get("ok"),
+            "snapshot_status": (
+                (order_snapshot.get("order") or {}).get("status")
+                if isinstance(order_snapshot.get("order"), dict)
+                else None
+            ),
         },
     )
 
@@ -649,6 +747,7 @@ def place_limit_order(
         "order_id": order_id,
         "entry_size_tokens": entry_size_tokens,
         "raw": result.get("response"),
+        "order_snapshot": order_snapshot,
     }
 
 

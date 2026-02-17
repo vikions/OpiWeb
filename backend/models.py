@@ -77,6 +77,10 @@ class LimitOrderRequest(BaseModel):
         return value
 
 
+class CancelOrderRequest(BaseModel):
+    order_id: str = Field(..., min_length=6, max_length=200)
+
+
 class TpLevel(BaseModel):
     price: float = Field(..., gt=0, lt=1)
     size_pct: float = Field(..., gt=0, le=100)
