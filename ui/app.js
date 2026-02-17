@@ -525,7 +525,7 @@ async function refreshMe() {
   setJSON("meBox", state.me);
   setText(
     "authState",
-    `EOA: ${state.me.eoa_address}\nMode: ${state.me.trading_context.mode}\nTrading: ${state.me.trading_context.trading_address}\nOrder signing: ${state.me.server_signing ? "server" : "wallet"}`,
+    `EOA: ${state.me.eoa_address}\nMode: ${state.me.trading_context.mode}\nTrading: ${state.me.trading_context.trading_address}`,
   );
   renderWalletSummary();
   updateMarketUiState();
@@ -545,7 +545,8 @@ async function handleConnect() {
     const signature = await signPersonal(address, nonceData.message);
 
     const clobAuthTimestamp = Math.floor(Date.now() / 1000);
-    const clobAuthNonce = Math.floor(Math.random() * 1_000_000_000);
+    // Keep CLOB auth nonce deterministic so we derive the same API key owner across sessions.
+    const clobAuthNonce = 0;
     const clobAuthTyped = {
       types: CLOB_AUTH_TYPES,
       primaryType: "ClobAuth",
@@ -782,19 +783,16 @@ async function handlePlaceEntry() {
         `Order is below market minimum after rounding. Min is ${minOrderSize} USDC, current maker amount is ${normalizedSizeUsdc.toFixed(6)} USDC. Increase Size (Shares).`,
       );
     }
-    let signedOrder = null;
-    if (!state.me.server_signing) {
-      const unsigned = buildUnsignedOrder({
-        tokenId,
-        side: "BUY",
-        makerAmount: amounts.makerAmount,
-        takerAmount: amounts.takerAmount,
-        feeRateBps,
-      });
-      signedOrder = await signOrder(unsigned, {
-        exchangeAddress: tokenMeta.exchange_address,
-      });
-    }
+    const unsigned = buildUnsignedOrder({
+      tokenId,
+      side: "BUY",
+      makerAmount: amounts.makerAmount,
+      takerAmount: amounts.takerAmount,
+      feeRateBps,
+    });
+    const signedOrder = await signOrder(unsigned, {
+      exchangeAddress: tokenMeta.exchange_address,
+    });
 
     const result = await api("/api/order/limit", {
       method: "POST",
@@ -820,7 +818,7 @@ async function handlePlaceEntry() {
       neg_risk: Boolean(tokenMeta.neg_risk),
       tick_size: tokenMeta.tick_size,
       fee_rate_bps: feeRateBps,
-      signed_order: signedOrder || undefined,
+      signed_order: signedOrder,
     };
 
     $("entryOrderId").value = result.order_id || "";

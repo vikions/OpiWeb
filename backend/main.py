@@ -21,7 +21,6 @@ from .config import (
     AUTH_RATE_LIMIT_WINDOW_SECONDS,
     CHAIN_ID,
     CLOB_HOST,
-    SERVER_SIGNING_PRIVATE_KEY,
     SESSION_COOKIE_NAME,
     WEB_EXPERIMENT_ENABLED,
 )
@@ -394,7 +393,6 @@ def get_me(session: Dict[str, Any] = Depends(_session_from_cookie)):
     return {
         "eoa_address": session["eoa_address"],
         "trading_context": session["trading_context"],
-        "server_signing": bool(SERVER_SIGNING_PRIVATE_KEY),
     }
 
 
@@ -496,7 +494,6 @@ def get_order_by_id(
         creds=session["clob_creds"],
         funder_address=context.get("funder_address"),
         signature_type=int(context.get("signature_type") or 0),
-        private_key=SERVER_SIGNING_PRIVATE_KEY,
     )
     try:
         return client.get_order(order_id)
@@ -518,7 +515,6 @@ def get_open_orders(
         creds=session["clob_creds"],
         funder_address=context.get("funder_address"),
         signature_type=int(context.get("signature_type") or 0),
-        private_key=SERVER_SIGNING_PRIVATE_KEY,
     )
     try:
         return client.get_open_orders(market=market, asset_id=asset_id)
@@ -539,7 +535,6 @@ def cancel_order(
         creds=session["clob_creds"],
         funder_address=context.get("funder_address"),
         signature_type=int(context.get("signature_type") or 0),
-        private_key=SERVER_SIGNING_PRIVATE_KEY,
     )
     try:
         cancelled = client.cancel_order(payload.order_id)
@@ -566,94 +561,12 @@ def place_limit_order(
         return {"status": "duplicate", "detail": "idempotency_key already used"}
 
     context = session["trading_context"]
-    use_server_signing = bool(SERVER_SIGNING_PRIVATE_KEY)
     client = Level2SessionClobClient(
         eoa_address=session["eoa_address"],
         creds=session["clob_creds"],
         funder_address=context.get("funder_address"),
         signature_type=int(context.get("signature_type") or 0),
-        private_key=SERVER_SIGNING_PRIVATE_KEY,
     )
-
-    if use_server_signing:
-        server_signer = str(client.signer_address()).lower()
-        expected_signer = str(session["eoa_address"]).lower()
-        if server_signer != expected_signer:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "WEB_EXPERIMENT_SERVER_PRIVATE_KEY does not match authenticated EOA. "
-                    f"server={client.signer_address()} session={session['eoa_address']}"
-                ),
-            )
-
-        if payload.size_tokens is None or float(payload.size_tokens) <= 0:
-            raise HTTPException(
-                status_code=400,
-                detail="size_tokens is required in server signing mode",
-            )
-
-        print(
-            "[WEB_EXPERIMENT] place_limit_attempt_server_signing",
-            {
-                "eoa": session["eoa_address"],
-                "maker": context.get("trading_address"),
-                "signer": client.signer_address(),
-                "token_id": payload.token_id,
-                "side": payload.side,
-                "price": payload.price,
-                "size_tokens": payload.size_tokens,
-                "order_type": payload.order_type,
-                "signature_type": int(context.get("signature_type") or 0),
-            },
-        )
-
-        try:
-            result = client.create_and_post_limit_order(
-                token_id=payload.token_id,
-                price=float(payload.price),
-                size_tokens=float(payload.size_tokens),
-                side=payload.side,
-                order_type=payload.order_type,
-            )
-        except PolyApiException as exc:
-            raise _poly_api_error_to_http(exc, fallback_status=400) from exc
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail=f"Failed to create/post order: {exc}") from exc
-
-        order_id = result.get("order_id")
-        entry_size_tokens = float(payload.size_tokens)
-        order_snapshot = _get_order_snapshot(client, order_id)
-
-        print(
-            "[WEB_EXPERIMENT] limit_order_server_signing",
-            {
-                "eoa": session["eoa_address"],
-                "trading_address": context.get("trading_address"),
-                "token_id": payload.token_id,
-                "side": payload.side,
-                "price": payload.price,
-                "order_id": order_id,
-                "entry_size_tokens": entry_size_tokens,
-                "snapshot_ok": order_snapshot.get("ok"),
-                "snapshot_status": (
-                    (order_snapshot.get("order") or {}).get("status")
-                    if isinstance(order_snapshot.get("order"), dict)
-                    else None
-                ),
-            },
-        )
-
-        return {
-            "status": "success",
-            "order_id": order_id,
-            "entry_size_tokens": entry_size_tokens,
-            "raw": result.get("response"),
-            "order_snapshot": order_snapshot,
-        }
-
-    if not payload.signed_order:
-        raise HTTPException(status_code=400, detail="signed_order is required")
 
     _validate_signed_order(
         signed_order=payload.signed_order,
