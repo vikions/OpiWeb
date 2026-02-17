@@ -44,6 +44,16 @@ const CLOB_AUTH_TYPES = {
   ],
 };
 
+const CHAIN_PARAMS_BY_ID = {
+  137: {
+    chainId: "0x89",
+    chainName: "Polygon Mainnet",
+    nativeCurrency: { name: "MATIC", symbol: "MATIC", decimals: 18 },
+    rpcUrls: ["https://polygon-rpc.com"],
+    blockExplorerUrls: ["https://polygonscan.com"],
+  },
+};
+
 const $ = (id) => document.getElementById(id);
 
 function setText(id, text) {
@@ -105,6 +115,65 @@ async function getConnectedAddress() {
   return accounts[0];
 }
 
+async function getActiveChainId() {
+  const raw = await window.ethereum.request({ method: "eth_chainId" });
+  if (typeof raw !== "string" || !raw.startsWith("0x")) {
+    throw new Error(`Unexpected eth_chainId response: ${String(raw)}`);
+  }
+  const chainId = Number.parseInt(raw, 16);
+  if (!Number.isInteger(chainId) || chainId <= 0) {
+    throw new Error(`Invalid active chainId: ${raw}`);
+  }
+  return chainId;
+}
+
+async function ensureWalletChain(expectedChainId) {
+  if (!window.ethereum) {
+    throw new Error("No injected wallet found. Install MetaMask.");
+  }
+
+  const target = Number(expectedChainId);
+  if (!Number.isInteger(target) || target <= 0) {
+    return;
+  }
+
+  const active = await getActiveChainId();
+  if (active === target) {
+    return;
+  }
+
+  const targetHex = `0x${target.toString(16)}`;
+  try {
+    await window.ethereum.request({
+      method: "wallet_switchEthereumChain",
+      params: [{ chainId: targetHex }],
+    });
+  } catch (err) {
+    const code = Number(err?.code);
+    const params = CHAIN_PARAMS_BY_ID[target];
+    if (code === 4902 && params) {
+      await window.ethereum.request({
+        method: "wallet_addEthereumChain",
+        params: [params],
+      });
+      await window.ethereum.request({
+        method: "wallet_switchEthereumChain",
+        params: [{ chainId: targetHex }],
+      });
+    } else {
+      const msg = err?.message ? ` ${err.message}` : "";
+      throw new Error(
+        `Switch wallet network to chainId ${target}. Active chainId is ${active}.${msg}`,
+      );
+    }
+  }
+
+  const activeAfter = await getActiveChainId();
+  if (activeAfter !== target) {
+    throw new Error(`Wallet chainId is ${activeAfter}, expected ${target}.`);
+  }
+}
+
 async function signPersonal(address, message) {
   return window.ethereum.request({
     method: "personal_sign",
@@ -113,6 +182,10 @@ async function signPersonal(address, message) {
 }
 
 async function signTypedDataV4(address, typedData) {
+  const expectedChainId = Number(typedData?.domain?.chainId);
+  if (Number.isInteger(expectedChainId) && expectedChainId > 0) {
+    await ensureWalletChain(expectedChainId);
+  }
   return window.ethereum.request({
     method: "eth_signTypedData_v4",
     params: [address, JSON.stringify(typedData)],
