@@ -55,6 +55,13 @@ const CHAIN_PARAMS_BY_ID = {
   },
 };
 
+const ROUNDING_CONFIG_BY_TICK = {
+  "0.1": { price: 1, size: 2, amount: 3 },
+  "0.01": { price: 2, size: 2, amount: 4 },
+  "0.001": { price: 3, size: 2, amount: 5 },
+  "0.0001": { price: 4, size: 2, amount: 6 },
+};
+
 const $ = (id) => document.getElementById(id);
 
 function setText(id, text) {
@@ -279,12 +286,99 @@ function selectMarket(market) {
   updateMarketUiState();
 }
 
-function toMicro(amount) {
-  const n = Number(amount);
-  if (!Number.isFinite(n) || n <= 0) {
-    throw new Error(`Invalid amount: ${amount}`);
+function roundDown(value, digits) {
+  const p = 10 ** Number(digits || 0);
+  return Math.floor(Number(value) * p) / p;
+}
+
+function roundNormal(value, digits) {
+  const p = 10 ** Number(digits || 0);
+  return Math.round(Number(value) * p) / p;
+}
+
+function roundUp(value, digits) {
+  const p = 10 ** Number(digits || 0);
+  return Math.ceil(Number(value) * p) / p;
+}
+
+function decimalPlaces(value) {
+  const text = String(value).toLowerCase();
+  if (text.includes("e-")) {
+    const [base, expText] = text.split("e-");
+    const frac = (base.split(".")[1] || "").length;
+    const exp = Number(expText || 0);
+    return frac + exp;
   }
-  return BigInt(Math.round(n * 1e6));
+  const frac = text.split(".")[1] || "";
+  return frac.length;
+}
+
+function toTokenDecimals(value) {
+  const scaled = Number(value) * 1_000_000;
+  if (!Number.isFinite(scaled)) {
+    throw new Error(`Invalid token amount: ${value}`);
+  }
+  return String(Math.round(scaled));
+}
+
+function getRoundConfig(tickSize) {
+  const key = String(tickSize || "0.01");
+  return ROUNDING_CONFIG_BY_TICK[key] || ROUNDING_CONFIG_BY_TICK["0.01"];
+}
+
+function validatePriceAgainstTick(price, tickSize) {
+  const tick = Number(tickSize);
+  if (!Number.isFinite(tick) || tick <= 0 || tick >= 1) {
+    return;
+  }
+  if (price < tick || price > 1 - tick) {
+    throw new Error(`Price ${price} must be between ${tick} and ${1 - tick} for tick ${tick}.`);
+  }
+}
+
+function computeOrderAmounts({ side, sizeTokens, price, tickSize }) {
+  const cfg = getRoundConfig(tickSize);
+  const rawPrice = roundNormal(Number(price), cfg.price);
+  const rawSize = roundDown(Number(sizeTokens), cfg.size);
+
+  if (!(rawPrice > 0 && rawPrice < 1)) {
+    throw new Error(`Invalid rounded price: ${rawPrice}`);
+  }
+  if (!(rawSize > 0)) {
+    throw new Error(`Order size is too small after rounding: ${rawSize}`);
+  }
+
+  let rawMaker;
+  let rawTaker;
+
+  if (side === "BUY") {
+    rawTaker = rawSize;
+    rawMaker = rawTaker * rawPrice;
+    if (decimalPlaces(rawMaker) > cfg.amount) {
+      rawMaker = roundUp(rawMaker, cfg.amount + 4);
+      if (decimalPlaces(rawMaker) > cfg.amount) {
+        rawMaker = roundDown(rawMaker, cfg.amount);
+      }
+    }
+  } else if (side === "SELL") {
+    rawMaker = rawSize;
+    rawTaker = rawMaker * rawPrice;
+    if (decimalPlaces(rawTaker) > cfg.amount) {
+      rawTaker = roundUp(rawTaker, cfg.amount + 4);
+      if (decimalPlaces(rawTaker) > cfg.amount) {
+        rawTaker = roundDown(rawTaker, cfg.amount);
+      }
+    }
+  } else {
+    throw new Error(`Unsupported side: ${side}`);
+  }
+
+  return {
+    makerAmount: toTokenDecimals(rawMaker),
+    takerAmount: toTokenDecimals(rawTaker),
+    normalizedPrice: rawPrice,
+    normalizedSizeTokens: rawSize,
+  };
 }
 
 function randomUint(bits = 256) {
@@ -575,20 +669,17 @@ function orderDomain(exchangeAddressOverride = null) {
   };
 }
 
-function buildUnsignedOrder({ tokenId, side, price, sizeTokens, nonceOverride }) {
+function buildUnsignedOrder({
+  tokenId,
+  side,
+  makerAmount,
+  takerAmount,
+  feeRateBps = 0,
+  nonceOverride,
+}) {
   const ctx = state.me.trading_context;
   const sideNum = side === "BUY" ? 0 : 1;
   const signatureType = Number(ctx.signature_type || 0);
-
-  const makerAmount =
-    side === "BUY"
-      ? toMicro(sizeTokens * price).toString()
-      : toMicro(sizeTokens).toString();
-
-  const takerAmount =
-    side === "BUY"
-      ? toMicro(sizeTokens).toString()
-      : toMicro(sizeTokens * price).toString();
 
   return {
     salt: randomUint(256),
@@ -596,11 +687,11 @@ function buildUnsignedOrder({ tokenId, side, price, sizeTokens, nonceOverride })
     signer: state.me.eoa_address,
     taker: ZERO,
     tokenId: String(tokenId),
-    makerAmount,
-    takerAmount,
+    makerAmount: String(makerAmount),
+    takerAmount: String(takerAmount),
     expiration: "0",
     nonce: String(nonceOverride ?? Math.floor(Math.random() * 1_000_000_000)),
-    feeRateBps: "0",
+    feeRateBps: String(feeRateBps),
     side: sideNum,
     signatureType,
   };
@@ -667,13 +758,26 @@ async function handlePlaceEntry() {
       throw new Error("Size USDC must be > 0");
     }
 
-    const sizeTokens = sizeUsdc / price;
     const tokenMeta = await getTokenMeta(tokenId);
+    const tickSize = String(tokenMeta.tick_size || "0.01");
+    const feeRateBps = Number(tokenMeta.fee_rate_bps || 0);
+    validatePriceAgainstTick(price, tickSize);
+
+    const requestedSizeTokens = sizeUsdc / price;
+    const amounts = computeOrderAmounts({
+      side: "BUY",
+      sizeTokens: requestedSizeTokens,
+      price,
+      tickSize,
+    });
+
+    const normalizedSizeUsdc = Number(amounts.makerAmount) / 1e6;
     const unsigned = buildUnsignedOrder({
       tokenId,
       side: "BUY",
-      price,
-      sizeTokens,
+      makerAmount: amounts.makerAmount,
+      takerAmount: amounts.takerAmount,
+      feeRateBps,
     });
     const signedOrder = await signOrder(unsigned, {
       exchangeAddress: tokenMeta.exchange_address,
@@ -685,9 +789,9 @@ async function handlePlaceEntry() {
         token_id: tokenId,
         side: "BUY",
         outcome: $("outcome").value,
-        price,
-        size_usdc: sizeUsdc,
-        size_tokens: sizeTokens,
+        price: amounts.normalizedPrice,
+        size_usdc: normalizedSizeUsdc,
+        size_tokens: amounts.normalizedSizeTokens,
         order_type: $("orderType").value,
         idempotency_key: `entry:${Date.now()}`,
         signed_order: signedOrder,
@@ -697,18 +801,19 @@ async function handlePlaceEntry() {
     state.lastEntry = {
       order_id: result.order_id,
       token_id: tokenId,
-      size_tokens: Number(result.entry_size_tokens || sizeTokens),
-      entry_price: price,
+      size_tokens: Number(result.entry_size_tokens || amounts.normalizedSizeTokens),
+      entry_price: amounts.normalizedPrice,
       exchange_address: tokenMeta.exchange_address,
       neg_risk: Boolean(tokenMeta.neg_risk),
       tick_size: tokenMeta.tick_size,
+      fee_rate_bps: feeRateBps,
       signed_order: signedOrder,
     };
 
     $("entryOrderId").value = result.order_id || "";
     setText(
       "entryState",
-      `Entry order submitted: ${result.order_id} | neg_risk=${tokenMeta.neg_risk ? "yes" : "no"} | tick=${tokenMeta.tick_size}`,
+      `Entry order submitted: ${result.order_id} | neg_risk=${tokenMeta.neg_risk ? "yes" : "no"} | tick=${tokenMeta.tick_size} | fee=${feeRateBps}`,
     );
     setJSON("entryBox", result);
   } catch (err) {
@@ -747,18 +852,35 @@ async function handleArmTp() {
     }
 
     const tokenMeta = await getTokenMeta(state.lastEntry.token_id);
+    const tickSize = String(tokenMeta.tick_size || state.lastEntry.tick_size || "0.01");
+    const feeRateBps = Number(
+      tokenMeta.fee_rate_bps ?? state.lastEntry.fee_rate_bps ?? 0,
+    );
     const signedTpOrders = [];
+    const normalizedLevels = [];
     for (let i = 0; i < levels.length; i += 1) {
       const lv = levels[i];
+      validatePriceAgainstTick(Number(lv.price), tickSize);
       const tpTokens = state.lastEntry.size_tokens * (lv.size_pct / 100);
+      const amounts = computeOrderAmounts({
+        side: "SELL",
+        sizeTokens: tpTokens,
+        price: Number(lv.price),
+        tickSize,
+      });
       const unsignedTp = buildUnsignedOrder({
         tokenId: state.lastEntry.token_id,
         side: "SELL",
-        price: lv.price,
-        sizeTokens: tpTokens,
+        makerAmount: amounts.makerAmount,
+        takerAmount: amounts.takerAmount,
+        feeRateBps,
       });
       const signedTp = await signOrder(unsignedTp, {
         exchangeAddress: tokenMeta.exchange_address,
+      });
+      normalizedLevels.push({
+        price: amounts.normalizedPrice,
+        size_pct: Number(lv.size_pct),
       });
       signedTpOrders.push({
         level_index: i,
@@ -772,7 +894,7 @@ async function handleArmTp() {
       token_id: state.lastEntry.token_id,
       entry_size_tokens: state.lastEntry.size_tokens,
       mode: $("tpMode").value,
-      levels,
+      levels: normalizedLevels,
       signed_tp_orders: signedTpOrders,
     };
 

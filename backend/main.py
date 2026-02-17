@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional
 
 from py_clob_client.client import ClobClient
 from py_clob_client.config import get_contract_config
+from py_clob_client.clob_types import AssetType
 from py_clob_client.exceptions import PolyApiException
 from fastapi import Cookie, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -261,18 +262,53 @@ def get_token_meta(
     try:
         neg_risk = bool(public_clob.get_neg_risk(token_id))
         tick_size = str(public_clob.get_tick_size(token_id))
+        fee_rate_bps = int(public_clob.get_fee_rate_bps(token_id) or 0)
         exchange_address = get_contract_config(CHAIN_ID, neg_risk).exchange
         return {
             "token_id": str(token_id),
             "chain_id": CHAIN_ID,
             "neg_risk": neg_risk,
             "tick_size": tick_size,
+            "fee_rate_bps": fee_rate_bps,
             "exchange_address": exchange_address,
         }
     except PolyApiException as exc:
         raise _poly_api_error_to_http(exc, fallback_status=400) from exc
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Failed to load token metadata: {exc}") from exc
+
+
+@app.get("/api/token/allowance")
+def get_token_allowance(
+    token_id: str = Query(..., min_length=10, max_length=200),
+    session: Dict[str, Any] = Depends(_session_from_cookie),
+):
+    context = session["trading_context"]
+    client = Level2SessionClobClient(
+        eoa_address=session["eoa_address"],
+        creds=session["clob_creds"],
+        funder_address=context.get("funder_address"),
+        signature_type=int(context.get("signature_type") or 0),
+    )
+
+    try:
+        collateral = client.get_balance_allowance(asset_type=AssetType.COLLATERAL)
+        conditional = client.get_balance_allowance(
+            asset_type=AssetType.CONDITIONAL,
+            token_id=token_id,
+        )
+        return {
+            "token_id": str(token_id),
+            "collateral": collateral.get("response"),
+            "conditional": conditional.get("response"),
+        }
+    except PolyApiException as exc:
+        raise _poly_api_error_to_http(exc, fallback_status=400) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to load allowance: {exc}",
+        ) from exc
 
 
 @app.post("/api/order/limit")
@@ -296,6 +332,23 @@ def place_limit_order(
         creds=session["clob_creds"],
         funder_address=context.get("funder_address"),
         signature_type=int(context.get("signature_type") or 0),
+    )
+
+    print(
+        "[WEB_EXPERIMENT] place_limit_attempt",
+        {
+            "eoa": session["eoa_address"],
+            "maker": payload.signed_order.get("maker"),
+            "signer": payload.signed_order.get("signer"),
+            "token_id": payload.token_id,
+            "side": payload.side,
+            "price": payload.price,
+            "order_type": payload.order_type,
+            "signature_type": payload.signed_order.get("signatureType"),
+            "maker_amount": payload.signed_order.get("makerAmount"),
+            "taker_amount": payload.signed_order.get("takerAmount"),
+            "fee_rate_bps": payload.signed_order.get("feeRateBps"),
+        },
     )
 
     try:

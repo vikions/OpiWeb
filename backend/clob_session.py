@@ -5,7 +5,12 @@ from typing import Any, Dict, Optional
 
 from eth_utils import is_address
 from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import ApiCreds, OpenOrderParams, OrderType
+from py_clob_client.clob_types import (
+    ApiCreds,
+    BalanceAllowanceParams,
+    OpenOrderParams,
+    OrderType,
+)
 
 from .polymarket.clob_trading import build_builder_config, normalize_order_id
 
@@ -98,3 +103,14 @@ class Level2SessionClobClient:
     def cancel_order(self, order_id: str) -> Dict[str, Any]:
         response = self.client.cancel(order_id)
         return {"status": "success", "response": response, "order_id": order_id}
+
+    def get_balance_allowance(
+        self, asset_type: str, token_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        params = BalanceAllowanceParams(
+            asset_type=asset_type,
+            token_id=token_id,
+            signature_type=-1,
+        )
+        response = self.client.get_balance_allowance(params=params)
+        return {"status": "success", "response": response}
