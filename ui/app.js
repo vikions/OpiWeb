@@ -776,14 +776,13 @@ async function handlePlaceEntry() {
       tickSize,
     });
 
+    const normalizedSizeUsdc = Number(amounts.makerAmount) / 1e6;
     const minOrderSize = toPositiveNumberOrNull(tokenMeta.min_order_size);
-    if (minOrderSize !== null && amounts.normalizedSizeTokens + 1e-9 < minOrderSize) {
+    if (minOrderSize !== null && normalizedSizeUsdc + 1e-9 < minOrderSize) {
       throw new Error(
-        `Order size is too small for this market. Min size is ${minOrderSize} tokens, current size is ${amounts.normalizedSizeTokens}. Increase Size USDC.`,
+        `Order is below market minimum after rounding. Min is ${minOrderSize} USDC, current maker amount is ${normalizedSizeUsdc.toFixed(6)} USDC. Increase Size USDC.`,
       );
     }
-
-    const normalizedSizeUsdc = Number(amounts.makerAmount) / 1e6;
     const unsigned = buildUnsignedOrder({
       tokenId,
       side: "BUY",

@@ -101,6 +101,48 @@ def _calc_order_size_tokens(signed_order: Dict[str, Any]) -> float:
     return maker_amount / 1e6
 
 
+def _safe_float(value: Any) -> Optional[float]:
+    try:
+        out = float(value)
+        if out != out:
+            return None
+        return out
+    except Exception:
+        return None
+
+
+def _invalid_payload_min_size_hint(token_id: str, signed_order: Dict[str, Any]) -> Optional[str]:
+    try:
+        book = public_clob.get_order_book(token_id)
+        min_raw = getattr(book, "min_order_size", None)
+        min_size = _safe_float(min_raw)
+        if not min_size or min_size <= 0:
+            return None
+
+        side = _normalize_side(signed_order.get("side"))
+        maker_amount = _safe_float(signed_order.get("makerAmount")) or 0.0
+        taker_amount = _safe_float(signed_order.get("takerAmount")) or 0.0
+
+        # In BUY orders makerAmount is USDC, takerAmount is shares. In SELL it's the opposite.
+        if side == "BUY":
+            maker_usdc = maker_amount / 1e6
+            if maker_usdc + 1e-9 < min_size:
+                return (
+                    f"Hint: market min_order_size={min_size:g} and your BUY makerAmount is "
+                    f"{maker_usdc:.6f} USDC after rounding."
+                )
+        else:
+            maker_tokens = maker_amount / 1e6
+            if maker_tokens + 1e-9 < min_size:
+                return (
+                    f"Hint: market min_order_size={min_size:g} and your SELL makerAmount is "
+                    f"{maker_tokens:.6f} tokens after rounding."
+                )
+    except Exception:
+        return None
+    return None
+
+
 def _to_int_or_raise(value: Any, field: str) -> int:
     if isinstance(value, bool):
         raise HTTPException(status_code=400, detail=f"{field} must be integer-like")
@@ -496,7 +538,13 @@ def place_limit_order(
             order_type=payload.order_type,
         )
     except PolyApiException as exc:
-        raise _poly_api_error_to_http(exc, fallback_status=400) from exc
+        http_exc = _poly_api_error_to_http(exc, fallback_status=400)
+        detail = str(http_exc.detail or "")
+        if "Invalid order payload" in detail:
+            hint = _invalid_payload_min_size_hint(payload.token_id, payload.signed_order)
+            if hint:
+                http_exc.detail = f"{detail} {hint}"
+        raise http_exc from exc
     except HTTPException:
         raise
     except Exception as exc:
