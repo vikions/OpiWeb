@@ -1,0 +1,9 @@
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+pydantic>=2.7.0
+requests>=2.32.0
+python-dotenv>=1.0.1
+eth-account>=0.13.0
+eth-utils>=4.1.1
+py-clob-client
+py-builder-signing-sdk

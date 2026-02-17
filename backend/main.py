@@ -1,0 +1,311 @@
+from __future__ import annotations
+
+import time
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+from fastapi import Cookie, Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+
+from . import auth
+from .clob_session import Level2SessionClobClient
+from .config import (
+    AUTH_RATE_LIMIT_MAX_REQUESTS,
+    AUTH_RATE_LIMIT_WINDOW_SECONDS,
+    CHAIN_ID,
+    SESSION_COOKIE_NAME,
+    WEB_EXPERIMENT_ENABLED,
+)
+from .models import (
+    LimitOrderRequest,
+    NonceRequest,
+    NonceResponse,
+    SearchResult,
+    TpArmRequest,
+    TpStatusResponse,
+    VerifyRequest,
+)
+from .resolver import TradingContextResolver
+from .store import InMemoryStore
+from .tp_engine import TpEngine
+
+if not WEB_EXPERIMENT_ENABLED:
+    raise RuntimeError("WEB_EXPERIMENT is disabled. Set WEB_EXPERIMENT=1 to run this app.")
+
+store = InMemoryStore()
+resolver = TradingContextResolver()
+tp_engine = TpEngine(store)
+
+app = FastAPI(title="OpiPoliX Web Experiment", version="0.1.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+def _client_ip(request: Request) -> str:
+    fwd = request.headers.get("x-forwarded-for")
+    if fwd:
+        return fwd.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _enforce_auth_rate_limit(request: Request, bucket: str) -> None:
+    ip = _client_ip(request)
+    key = f"{bucket}:{ip}"
+    allowed = store.allow_rate_limit(
+        key=key,
+        max_requests=AUTH_RATE_LIMIT_MAX_REQUESTS,
+        window_seconds=AUTH_RATE_LIMIT_WINDOW_SECONDS,
+    )
+    if not allowed:
+        raise HTTPException(status_code=429, detail="Too many auth attempts")
+
+
+def _to_lower(value: Any) -> str:
+    return str(value or "").lower()
+
+
+def _normalize_side(raw: Any) -> str:
+    if isinstance(raw, str):
+        text = raw.upper().strip()
+        if text in {"BUY", "SELL"}:
+            return text
+    try:
+        n = int(raw)
+        return "BUY" if n == 0 else "SELL"
+    except Exception:
+        pass
+    raise HTTPException(status_code=400, detail="Invalid order side")
+
+
+def _calc_order_size_tokens(signed_order: Dict[str, Any]) -> float:
+    side = _normalize_side(signed_order.get("side"))
+    maker_amount = float(signed_order.get("makerAmount") or 0)
+    taker_amount = float(signed_order.get("takerAmount") or 0)
+    if side == "BUY":
+        return taker_amount / 1e6
+    return maker_amount / 1e6
+
+
+def _validate_signed_order(
+    signed_order: Dict[str, Any],
+    session: Dict[str, Any],
+    token_id: str,
+    expected_side: str,
+) -> None:
+    context = session["trading_context"]
+    expected_signer = _to_lower(session["eoa_address"])
+    expected_maker = _to_lower(context.get("trading_address"))
+    expected_sig_type = int(context.get("signature_type") or 0)
+
+    signer = _to_lower(signed_order.get("signer"))
+    maker = _to_lower(signed_order.get("maker"))
+
+    if signer != expected_signer:
+        raise HTTPException(status_code=400, detail="Signed order signer mismatch")
+
+    if maker != expected_maker:
+        raise HTTPException(status_code=400, detail="Signed order maker mismatch")
+
+    order_sig_type = int(signed_order.get("signatureType"))
+    if order_sig_type != expected_sig_type:
+        raise HTTPException(status_code=400, detail="signatureType mismatch")
+
+    if str(signed_order.get("tokenId")) != str(token_id):
+        raise HTTPException(status_code=400, detail="tokenId mismatch")
+
+    side = _normalize_side(signed_order.get("side"))
+    if side != expected_side:
+        raise HTTPException(status_code=400, detail=f"Expected {expected_side} order")
+
+
+def _session_from_cookie(session_token: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE_NAME)):
+    if not session_token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    session = store.get_session(session_token)
+    if not session:
+        raise HTTPException(status_code=401, detail="Invalid or expired session")
+    return session
+
+
+@app.post("/api/auth/nonce", response_model=NonceResponse)
+def create_nonce(payload: NonceRequest, request: Request):
+    _enforce_auth_rate_limit(request, "nonce")
+
+    address = auth.validate_eth_address(payload.address)
+    message = auth.build_siwe_message(address=address, nonce="{nonce}", chain_id=CHAIN_ID)
+    created = store.create_nonce(address=address, message=message)
+
+    nonce = created["nonce"]
+    message_with_nonce = message.replace("{nonce}", nonce)
+
+    return NonceResponse(nonce=nonce, message=message_with_nonce, chain_id=CHAIN_ID)
+
+
+@app.post("/api/auth/verify")
+def verify_auth(payload: VerifyRequest, request: Request, response: Response):
+    _enforce_auth_rate_limit(request, "verify")
+
+    address = auth.validate_eth_address(payload.address)
+
+    nonce_record = store.consume_nonce(address=address, nonce=payload.nonce)
+    if not nonce_record:
+        raise HTTPException(status_code=400, detail="Nonce is invalid or expired")
+
+    expected_message = str(nonce_record["message"]).replace("{nonce}", payload.nonce)
+    if payload.message != expected_message:
+        raise HTTPException(status_code=400, detail="Signed message mismatch")
+
+    recovered = auth.recover_personal_signer(payload.message, payload.signature)
+    if recovered.lower() != address.lower():
+        raise HTTPException(status_code=400, detail="SIWE signature address mismatch")
+
+    auth.recover_clob_auth_signer(
+        address=address,
+        signature=payload.clob_auth_signature,
+        timestamp=payload.clob_auth_timestamp,
+        nonce=payload.clob_auth_nonce,
+        chain_id=payload.chain_id,
+    )
+
+    clob_creds = auth.derive_clob_api_creds(
+        address=address,
+        signature=payload.clob_auth_signature,
+        timestamp=payload.clob_auth_timestamp,
+        nonce=payload.clob_auth_nonce,
+    )
+
+    context = resolver.resolve(address)
+    session = store.create_session(
+        eoa_address=address,
+        clob_creds=clob_creds,
+        trading_context=context,
+    )
+
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=session["token"],
+        httponly=True,
+        secure=False,
+        samesite="lax",
+        max_age=int(session["expires_at"] - time.time()),
+        path="/",
+    )
+
+    return {
+        "ok": True,
+        "eoa_address": session["eoa_address"],
+        "trading_context": context,
+    }
+
+
+@app.get("/api/me")
+def get_me(session: Dict[str, Any] = Depends(_session_from_cookie)):
+    return {
+        "eoa_address": session["eoa_address"],
+        "trading_context": session["trading_context"],
+    }
+
+
+@app.get("/api/search", response_model=list[SearchResult])
+def search_markets(
+    query: str = Query(..., min_length=2, max_length=100),
+    session: Dict[str, Any] = Depends(_session_from_cookie),
+):
+    _ = session
+    return resolver.search(query, limit=20)
+
+
+@app.post("/api/order/limit")
+def place_limit_order(
+    payload: LimitOrderRequest,
+    session: Dict[str, Any] = Depends(_session_from_cookie),
+):
+    if payload.idempotency_key and not store.mark_idempotent(payload.idempotency_key):
+        return {"status": "duplicate", "detail": "idempotency_key already used"}
+
+    _validate_signed_order(
+        signed_order=payload.signed_order,
+        session=session,
+        token_id=payload.token_id,
+        expected_side=payload.side,
+    )
+
+    context = session["trading_context"]
+    client = Level2SessionClobClient(
+        eoa_address=session["eoa_address"],
+        creds=session["clob_creds"],
+        funder_address=context.get("funder_address"),
+        signature_type=int(context.get("signature_type") or 0),
+    )
+
+    result = client.post_signed_order(
+        signed_order=payload.signed_order,
+        order_type=payload.order_type,
+    )
+
+    order_id = result.get("order_id")
+    entry_size_tokens = payload.size_tokens
+    if entry_size_tokens is None:
+        entry_size_tokens = _calc_order_size_tokens(payload.signed_order)
+
+    print(
+        "[WEB_EXPERIMENT] limit_order",
+        {
+            "eoa": session["eoa_address"],
+            "trading_address": context.get("trading_address"),
+            "token_id": payload.token_id,
+            "side": payload.side,
+            "price": payload.price,
+            "order_id": order_id,
+            "entry_size_tokens": entry_size_tokens,
+        },
+    )
+
+    return {
+        "status": "success",
+        "order_id": order_id,
+        "entry_size_tokens": entry_size_tokens,
+        "raw": result.get("response"),
+    }
+
+
+@app.post("/api/tp/arm")
+async def arm_tp(
+    payload: TpArmRequest,
+    session: Dict[str, Any] = Depends(_session_from_cookie),
+):
+    for item in payload.signed_tp_orders:
+        _validate_signed_order(
+            signed_order=item.signed_order,
+            session=session,
+            token_id=payload.token_id,
+            expected_side="SELL",
+        )
+
+    arm_state = tp_engine.arm(session=session, payload=payload.model_dump())
+    return {
+        "status": "armed",
+        "arm_id": arm_state["arm_id"],
+        "entry_order_id": payload.entry_order_id,
+    }
+
+
+@app.get("/api/tp/status", response_model=TpStatusResponse)
+def get_tp_status(
+    arm_id: Optional[str] = Query(default=None),
+    session: Dict[str, Any] = Depends(_session_from_cookie),
+):
+    arms = tp_engine.get_status(eoa_address=session["eoa_address"], arm_id=arm_id)
+    return TpStatusResponse(arms=arms)
+
+
+UI_DIR = Path(__file__).resolve().parents[1] / "ui"
+app.mount("/", StaticFiles(directory=str(UI_DIR), html=True), name="ui")

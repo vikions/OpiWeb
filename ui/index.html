@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OpiPoliX Web Experiment</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <main class="container">
+    <h1>OpiPoliX Web Experiment</h1>
+    <p class="muted">BYO wallet auth + Dome search + signed CLOB limit + TP arm (experimental).</p>
+
+    <section class="card">
+      <h2>1) Wallet Auth</h2>
+      <button id="btnConnect">Connect & Sign In</button>
+      <div id="authState" class="mono"></div>
+      <pre id="meBox" class="code"></pre>
+    </section>
+
+    <section class="card">
+      <h2>2) Search Markets</h2>
+      <div class="row">
+        <input id="searchInput" placeholder="Team / project name (e.g. base, metamask)" />
+        <button id="btnSearch">Search</button>
+      </div>
+      <div id="searchResults"></div>
+    </section>
+
+    <section class="card">
+      <h2>3) Entry Limit Order</h2>
+      <div class="grid2">
+        <label>Selected Market ID<input id="marketId" readonly /></label>
+        <label>Selected Title<input id="marketTitle" readonly /></label>
+      </div>
+      <div class="grid2">
+        <label>YES Token ID<input id="yesToken" readonly /></label>
+        <label>NO Token ID<input id="noToken" readonly /></label>
+      </div>
+
+      <div class="grid2">
+        <label>Outcome
+          <select id="outcome">
+            <option value="YES">BUY YES</option>
+            <option value="NO">BUY NO</option>
+          </select>
+        </label>
+        <label>Limit Price (0..1)<input id="price" type="number" min="0.01" max="0.99" step="0.001" value="0.30" /></label>
+      </div>
+      <div class="grid2">
+        <label>Size USDC<input id="sizeUsdc" type="number" min="1" step="0.01" value="10" /></label>
+        <label>Order Type
+          <select id="orderType">
+            <option value="GTC">GTC</option>
+            <option value="GTD">GTD</option>
+            <option value="FAK">FAK</option>
+            <option value="FOK">FOK</option>
+          </select>
+        </label>
+      </div>
+      <button id="btnPlaceEntry">Sign & Place Entry LIMIT</button>
+      <div id="entryState" class="mono"></div>
+      <pre id="entryBox" class="code"></pre>
+    </section>
+
+    <section class="card">
+      <h2>4) TP Assistant</h2>
+      <div class="grid2">
+        <label>Mode
+          <select id="tpMode">
+            <option value="single">Single TP</option>
+            <option value="ladder">Ladder (3 levels)</option>
+          </select>
+        </label>
+        <label>Entry Order ID<input id="entryOrderId" readonly /></label>
+      </div>
+
+      <div id="tpSingle" class="tp-block">
+        <div class="grid2">
+          <label>TP Price<input id="tp1Price" type="number" min="0.01" max="0.99" step="0.001" value="0.45" /></label>
+          <label>TP Size %<input id="tp1Pct" type="number" min="1" max="100" step="0.1" value="100" /></label>
+        </div>
+      </div>
+
+      <div id="tpLadder" class="tp-block hidden">
+        <div class="grid3">
+          <label>TP1 Price<input id="tpL1Price" type="number" min="0.01" max="0.99" step="0.001" value="0.45" /></label>
+          <label>TP1 %<input id="tpL1Pct" type="number" min="1" max="100" step="0.1" value="30" /></label>
+          <span></span>
+
+          <label>TP2 Price<input id="tpL2Price" type="number" min="0.01" max="0.99" step="0.001" value="0.55" /></label>
+          <label>TP2 %<input id="tpL2Pct" type="number" min="1" max="100" step="0.1" value="30" /></label>
+          <span></span>
+
+          <label>TP3 Price<input id="tpL3Price" type="number" min="0.01" max="0.99" step="0.001" value="0.70" /></label>
+          <label>TP3 %<input id="tpL3Pct" type="number" min="1" max="100" step="0.1" value="40" /></label>
+          <span></span>
+        </div>
+      </div>
+
+      <button id="btnArmTp">Sign TP Orders & Arm</button>
+      <div id="tpState" class="mono"></div>
+      <pre id="tpBox" class="code"></pre>
+      <button id="btnRefreshTp">Refresh TP Status</button>
+    </section>
+  </main>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
